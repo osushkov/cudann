@@ -1,0 +1,2 @@
+include_rules
+: src/*.o src/common/common.a |> $(CC) %f -o %o $(CLFLAGS) |> cudann
