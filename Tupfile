@@ -1,2 +1,6 @@
 include_rules
-: src/*.o src/common/common.a |> $(CC) %f -o %o $(CLFLAGS) |> cudann
+: src/*.o \
+src/common/common.a \
+src/neuralnetwork/cuda/cuda.a \
+src/neuralnetwork/neuralnetwork.a \
+|> $(CC) %f -o %o $(CLFLAGS) |> cudann

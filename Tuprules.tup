@@ -7,7 +7,6 @@ CCFLAGS += -Wall -Wno-deprecated-declarations
 
 CUDAFLAGS += --std=c++11
 CUDAFLAGS += --default-stream per-thread
-CUDAFLAGS += -I/usr/local/include -I/usr/include/eigen3
 CUDAFLAGS += -Xcudafe "--diag_suppress=boolean_controlling_expr_is_constant"
 
 ifdef RELEASE
