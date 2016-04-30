@@ -1,8 +1,7 @@
 
 #pragma once
 
-namespace neuralnetwork {
-namespace cuda {
+namespace math {
 
 struct MatrixView {
   unsigned rows;
@@ -13,5 +12,4 @@ struct MatrixView {
   static MatrixView CreateZeroed(unsigned rows, unsigned cols);
   static void Release(MatrixView &view);
 };
-}
 }

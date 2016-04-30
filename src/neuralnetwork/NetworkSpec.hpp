@@ -12,6 +12,8 @@ struct NetworkSpec {
   unsigned numOutputs;
   std::vector<unsigned> hiddenLayers;
 
+  unsigned maxBatchSize;
+
   LayerActivation hiddenActivation;
   LayerActivation outputActivation;
 };

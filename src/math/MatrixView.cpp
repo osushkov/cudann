@@ -2,7 +2,7 @@
 #include "MatrixView.hpp"
 #include <cassert>
 
-using namespace neuralnetwork::cuda;
+using namespace math;
 
 MatrixView MatrixView::Create(unsigned rows, unsigned cols) {
   assert(rows > 0 && cols > 0);
