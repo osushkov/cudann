@@ -1,6 +1,7 @@
 
 #pragma once
 
+#include <cassert>
 #include <cstddef>
 #include <cuda_runtime.h>
 
@@ -19,6 +20,7 @@ struct LayerWeights {
   size_t pitch;
 
   __device__ float *Elem(unsigned r, unsigned c) {
+    assert(r < layerSize && c < inputSize);
     return (float *)((char *)weights + r * pitch) + c;
   }
 };
@@ -27,10 +29,11 @@ struct SamplesBatch {
   unsigned batchSize; // equal to the number of rows in the matrix.
   unsigned sampleDim; // equal to the number of columns in the matrix.
 
-  float *input; // matrix sized numSamples(rows) * sampleDim(cols)
+  float *input; // matrix sized batchSize(rows) * sampleDim(cols)
   size_t pitch;
 
   __device__ float *Elem(unsigned r, unsigned c) {
+    assert(r < batchSize && c < sampleDim);
     return (float *)((char *)input + r * pitch) + c;
   }
 };
@@ -46,10 +49,12 @@ struct LayerBatchOutputs {
   size_t dpitch;
 
   __device__ float *OutputElem(unsigned r, unsigned c) {
+    assert(r < batchSize && c < layerSize);
     return (float *)((char *)output + r * opitch) + c;
   }
 
   __device__ float *DerivativeElem(unsigned r, unsigned c) {
+    assert(r < batchSize && c < layerSize);
     return (float *)((char *)derivative + r * dpitch) + c;
   }
 };
@@ -62,6 +67,7 @@ struct LayerBatchDeltas {
   size_t pitch;
 
   __device__ float *Elem(unsigned r, unsigned c) {
+    assert(r < batchSize && c < layerSize);
     return (float *)((char *)delta + r * pitch) + c;
   }
 };

@@ -1,5 +1,6 @@
 
 #include "MatrixView.hpp"
+#include <algorithm>
 #include <cassert>
 
 using namespace math;
@@ -16,7 +17,7 @@ MatrixView MatrixView::Create(unsigned rows, unsigned cols) {
 
 MatrixView MatrixView::CreateZeroed(unsigned rows, unsigned cols) {
   MatrixView result = Create(rows, cols);
-  // TODO: memset to zero.
+  std::fill(result.data, result.data + rows * cols, 0.0f);
   return result;
 }
 
