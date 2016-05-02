@@ -53,15 +53,16 @@ void util::DeleteLayerWeights(LayerWeights &lw) {
   lw.weights = nullptr;
 }
 
-SamplesBatch util::NewSamplesBatch(unsigned batchSize, unsigned sampleDim) {
-  assert(batchSize > 0 && sampleDim > 0);
+SamplesBatch util::NewSamplesBatch(unsigned maxBatchSize, unsigned sampleDim) {
+  assert(maxBatchSize > 0 && sampleDim > 0);
 
   SamplesBatch result;
-  result.batchSize = batchSize;
+  result.maxBatchSize = maxBatchSize;
+  result.batchSize = 0;
   result.sampleDim = sampleDim;
 
   size_t width = sampleDim * sizeof(float);
-  size_t height = batchSize;
+  size_t height = maxBatchSize;
 
   cudaError_t err = cudaMallocPitch(&result.input, &result.pitch, width, height);
   CheckError(err);
@@ -75,15 +76,16 @@ void util::DeleteSamplesBatch(SamplesBatch &sb) {
   sb.input = nullptr;
 }
 
-LayerBatchOutputs util::NewLayerBatchOutputs(unsigned batchSize, unsigned layerSize) {
-  assert(batchSize > 0 && layerSize > 0);
+LayerBatchOutputs util::NewLayerBatchOutputs(unsigned maxBatchSize, unsigned layerSize) {
+  assert(maxBatchSize > 0 && layerSize > 0);
 
   LayerBatchOutputs result;
-  result.batchSize = batchSize;
+  result.maxBatchSize = maxBatchSize;
+  result.batchSize = 0;
   result.layerSize = layerSize;
 
   size_t width = layerSize * sizeof(float);
-  size_t height = batchSize;
+  size_t height = maxBatchSize;
 
   cudaError_t err = cudaMallocPitch(&result.output, &result.opitch, width, height);
   CheckError(err);
@@ -104,15 +106,16 @@ void util::DeleteLayerBatchOutputs(LayerBatchOutputs &lbo) {
   lbo.derivative = nullptr;
 }
 
-LayerBatchDeltas util::NewLayerBatchDeltas(unsigned batchSize, unsigned layerSize) {
-  assert(batchSize > 0 && layerSize > 0);
+LayerBatchDeltas util::NewLayerBatchDeltas(unsigned maxBatchSize, unsigned layerSize) {
+  assert(maxBatchSize > 0 && layerSize > 0);
 
   LayerBatchDeltas result;
-  result.batchSize = batchSize;
+  result.maxBatchSize = maxBatchSize;
+  result.batchSize = 0;
   result.layerSize = layerSize;
 
   size_t width = layerSize * sizeof(float);
-  size_t height = batchSize;
+  size_t height = maxBatchSize;
 
   cudaError_t err = cudaMallocPitch(&result.delta, &result.pitch, width, height);
   CheckError(err);

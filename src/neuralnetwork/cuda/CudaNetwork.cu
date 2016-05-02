@@ -13,8 +13,8 @@
 #include <cuda_runtime.h>
 
 // The default num threads per 2D block.
-static constexpr int TPB_X = 16;
-static constexpr int TPB_Y = 16;
+static constexpr int TPB_X = 2;
+static constexpr int TPB_Y = 2;
 
 using namespace neuralnetwork;
 using namespace neuralnetwork::cuda;
@@ -70,7 +70,7 @@ __global__ void initialiseLayerWeights(LayerWeights layer, const float initRange
   }
 
   float *out = layer.Elem(row, col);
-  *out = initRange * (rnd.SampleUniform(col + row * layer.inputSize) * 2.0f - 1.0f);
+  *out = row + col; //initRange * (rnd.SampleUniform(col + row * layer.inputSize) * 2.0f - 1.0f);
 }
 
 static void initialiseWeights(void) {
@@ -86,18 +86,18 @@ static void initialiseWeights(void) {
 
 __global__ void initialiseLayerOutputs(LayerBatchOutputs outputs) {
   const unsigned id = blockDim.x * blockIdx.x + threadIdx.x;
-  if (id >= outputs.batchSize) {
+  if (id >= outputs.maxBatchSize) {
     return;
   }
 
-  *(outputs.OutputElem(id, outputs.layerSize)) = 1.0f;
+  *(outputs.OutputElem(id, outputs.layerSize - 1)) = 1.0f;
 }
 
 static void initialiseOutputs(void) {
   // We initialise the outputs array for each layer to have a 1.0 at the end so that it can
   // be used as the bias input for the next layer.
   for (auto& lo : d_layerOutputs) {
-    int bpgX = (lo.batchSize + TPB_X - 1) / TPB_X;
+    int bpgX = (lo.maxBatchSize + TPB_X - 1) / TPB_X;
     initialiseLayerOutputs<<<bpgX, TPB_X>>>(lo);
   }
 }
@@ -106,6 +106,8 @@ void CudaNetwork::Initialise(const NetworkSpec &spec) {
   rnd = Random::Create(2048, 1337);
 
   networkSpec = spec;
+  assert(networkSpec.hiddenActivation != LayerActivation::SOFTMAX);
+
   allocDeviceMemory();
   initialiseWeights();
   initialiseOutputs();
@@ -150,7 +152,8 @@ void CudaNetwork::GetWeights(std::vector<math::MatrixView> &outWeights) {
 }
 
 static void forwardPass(const math::MatrixView &batchInputs);
-static void backwardPass(const math::MatrixView &batchOutputs);
+static void applySoftmax(const LayerBatchOutputs &lastLayer);
+// static void backwardPass(const math::MatrixView &batchOutputs);
 
 void CudaNetwork::Train(const math::MatrixView &batchInputs, const math::MatrixView &batchOutputs) {
     forwardPass(batchInputs);
@@ -194,14 +197,17 @@ __device__ float activationDerivative(float in, float out, const LayerActivation
 
 __global__ void layerForwardPass(LayerWeights lw, LayerBatchOutputs prevOutputs,
                                  LayerBatchOutputs out, const LayerActivation activation) {
+  assert(lw.inputSize == prevOutputs.layerSize);
+  assert(lw.layerSize == out.layerSize - 1);
+
   extern __shared__ float buf[]; // shared memory buffer
 
   const unsigned row = blockDim.y * blockIdx.y + threadIdx.y;
   const unsigned col = blockDim.x * blockIdx.x + threadIdx.x;
 
-  if (row >= out.batchSize || col >= out.layerSize) {
-    return;
-  }
+  // TODO: can implement a "fast path" and "slow path" versions of the below code and branch here.
+  // Fast path can assume that the entire block will fall within the bounds of all of the matrices
+  // and dispense with a whole bunch of the below checks.
 
   const int numChunks = (lw.inputSize + blockDim.x - 1) / blockDim.x;
 
@@ -212,33 +218,46 @@ __global__ void layerForwardPass(LayerWeights lw, LayerBatchOutputs prevOutputs,
   float *poChunk = (float *) &buf[blockDim.x * blockDim.y];
 
   float sum = 0.0f;
-  for (int i = 0; i < numChunks; i++) {
-    const int chunkOffset = i * blockDim.x;
-    const int chunkIndex = threadIdx.x + threadIdx.y * blockDim.x;
+  const int lwRow = blockDim.x * blockIdx.x + threadIdx.y;
+  const int poRow = row;
 
-    const int lwRow = col;
+  const int chunkIndex = threadIdx.x + threadIdx.y * blockDim.x;
+  const int lim = numChunks * blockDim.x;
+
+  for (int chunkOffset = 0; chunkOffset < lim; chunkOffset += blockDim.x) {
     const int lwCol = chunkOffset + threadIdx.x;
+    if (lwRow < lw.layerSize && lwCol < lw.inputSize) {
+      lwChunk[chunkIndex] = *lw.Elem(lwRow, lwCol);
+    }
 
-    const int poRow = row;
     const int poCol = lwCol;
-
-    // if (poCol < a.cols) {
-    //   lwChunk[chunkIndex] = *lw.Elem(lwRow, lwCol);
-    //   poChunk[chunkIndex] = *prevOutputs.OutputElem()
-    // }
-
+    if (poRow < prevOutputs.batchSize && poCol < prevOutputs.layerSize) {
+      poChunk[chunkIndex] = *prevOutputs.OutputElem(poRow, poCol);
+    }
     __syncthreads();
 
+    int chunkLim = min(blockDim.x, lw.inputSize - chunkOffset);
+    for (int j = 0; j < chunkLim; j++) {
+      sum += lwChunk[j + threadIdx.x * blockDim.x] * poChunk[j + threadIdx.y * blockDim.x];
+    }
+    __syncthreads();
   }
 
-  float *outElem = out.OutputElem(row, col);
-  *outElem = activationValue(sum, activation);
+  if (row < out.batchSize && col < out.layerSize - 1) {
+    float *outElem = out.OutputElem(row, col);
+    *outElem = activationValue(sum, activation);
 
-  float *dElem = out.DerivativeElem(row, col);
-  *dElem = activationDerivative(sum, *outElem, activation);
+    float *dElem = out.DerivativeElem(row, col);
+    *dElem = activationDerivative(sum, *outElem, activation);
+  }
 }
 
 void forwardPass(const math::MatrixView &batchInputs) {
+  for (auto& lo : d_layerOutputs) {
+    assert(batchInputs.rows <= lo.maxBatchSize);
+    lo.batchSize = batchInputs.rows;
+  }
+
   // copy the batch inputs into the first layer outputs.
   cudaError_t err = cudaMemcpy2D(
       d_layerOutputs[0].output, d_layerOutputs[0].opitch, // dst
@@ -248,7 +267,8 @@ void forwardPass(const math::MatrixView &batchInputs) {
   CheckError(err);
 
   for (unsigned i = 1; i < d_layerOutputs.size(); i++) {
-    int bpgX = (d_layerOutputs[i].layerSize + TPB_X - 1) / TPB_X;
+    // -1 is here since we dont need to compute the bias term for the output vector.
+    int bpgX = (d_layerOutputs[i].layerSize - 1 + TPB_X - 1) / TPB_X;
     int bpgY = (d_layerOutputs[i].batchSize + TPB_Y - 1) / TPB_Y;
     size_t sharedMemSize = 2 * TPB_X * TPB_Y * sizeof(float);
 
@@ -258,4 +278,42 @@ void forwardPass(const math::MatrixView &batchInputs) {
     layerForwardPass<<<dim3(bpgX, bpgY, 1), dim3(TPB_X, TPB_Y, 1), sharedMemSize>>>(
         d_layerWeights[i-1], d_layerOutputs[i-1], d_layerOutputs[i], activation);
   }
+
+  LayerBatchOutputs lastLayer = d_layerOutputs[d_layerOutputs.size() - 1];
+  if (networkSpec.outputActivation == LayerActivation::SOFTMAX) {
+    applySoftmax(lastLayer);
+  }
+
+  math::MatrixView output = math::MatrixView::Create(lastLayer.batchSize, lastLayer.layerSize);
+
+  err = cudaMemcpy2D(
+      output.data, output.cols * sizeof(float), // dst
+      lastLayer.output, lastLayer.opitch, // src
+      output.cols * sizeof(float), output.rows, // width, height
+      cudaMemcpyDeviceToHost);
+  CheckError(err);
+
+  for (unsigned r = 0; r < output.rows; r++) {
+    for (unsigned c = 0; c < output.cols; c++) {
+      cout << output.data[c + r * output.cols] << "\t";
+    }
+    cout << endl;
+  }
+  cout << endl;
+}
+
+// This softmax code assumes that the output layer is smaller than the maximum number of threads
+// in a block. For ease of implementation, we assume this and do the whole thing in a single block.
+// This allows easy synchronization and easy algorithm. Most problems wont have >1024 outputs.
+// Separate blocks can do separate batch rows.
+__global__ void layerForwardPass(LayerBatchOutputs outputs) {
+  extern __shared__ float buf[]; // shared memory buffer
+
+  const unsigned index = blockDim.x * blockIdx.x + threadIdx.x;
+  // if (index )
+}
+
+void applySoftmax(const LayerBatchOutputs &lastLayer) {
+  // assert(lastLayer.)
+
 }

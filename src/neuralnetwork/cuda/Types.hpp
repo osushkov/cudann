@@ -26,20 +26,24 @@ struct LayerWeights {
 };
 
 struct SamplesBatch {
-  unsigned batchSize; // equal to the number of rows in the matrix.
-  unsigned sampleDim; // equal to the number of columns in the matrix.
+  unsigned maxBatchSize; // number of rows allocated in memory.
+  unsigned batchSize;    // equal to the number of rows in the matrix.
+  unsigned sampleDim;    // equal to the number of columns in the matrix.
 
   float *input; // matrix sized batchSize(rows) * sampleDim(cols)
   size_t pitch;
 
   __device__ float *Elem(unsigned r, unsigned c) {
-    assert(r < batchSize && c < sampleDim);
+    assert(r < maxBatchSize && c < sampleDim);
     return (float *)((char *)input + r * pitch) + c;
   }
 };
 
 struct LayerBatchOutputs {
+  unsigned maxBatchSize;
   unsigned batchSize;
+
+  // layer size includes the bias term, so it will be equal to the number of nodes + 1
   unsigned layerSize;
 
   float *output; // matrix sized batchSize(rows) * layerSize(cols)
@@ -49,17 +53,18 @@ struct LayerBatchOutputs {
   size_t dpitch;
 
   __device__ float *OutputElem(unsigned r, unsigned c) {
-    assert(r < batchSize && c < layerSize);
+    assert(r < maxBatchSize && c < layerSize);
     return (float *)((char *)output + r * opitch) + c;
   }
 
   __device__ float *DerivativeElem(unsigned r, unsigned c) {
-    assert(r < batchSize && c < layerSize);
+    assert(r < maxBatchSize && c < layerSize);
     return (float *)((char *)derivative + r * dpitch) + c;
   }
 };
 
 struct LayerBatchDeltas {
+  unsigned maxBatchSize;
   unsigned batchSize;
   unsigned layerSize;
 
@@ -67,7 +72,7 @@ struct LayerBatchDeltas {
   size_t pitch;
 
   __device__ float *Elem(unsigned r, unsigned c) {
-    assert(r < batchSize && c < layerSize);
+    assert(r < maxBatchSize && c < layerSize);
     return (float *)((char *)delta + r * pitch) + c;
   }
 };
