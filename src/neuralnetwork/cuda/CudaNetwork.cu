@@ -2,6 +2,7 @@
 #include "CudaNetwork.hpp"
 #include "Util.hpp"
 #include "Random.hpp"
+#include "SoftmaxKernel.hpp"
 
 #include <cassert>
 #include <cmath>
@@ -28,6 +29,8 @@ static vector<LayerBatchOutputs> d_layerOutputs;
 static vector<LayerBatchDeltas> d_layerDeltas;
 static SamplesBatch d_samplesBatch;
 
+static LayerWeights d_transposeScratch;
+
 // Pre-allocated all of the device memory we will need. We should never have to malloc device
 // memory after this function is called.
 static void allocDeviceMemory(void) {
@@ -41,8 +44,14 @@ static void allocDeviceMemory(void) {
   d_layerOutputs.push_back(
       util::NewLayerBatchOutputs(networkSpec.maxBatchSize, networkSpec.numInputs + 1));
 
+  unsigned maxInputSize = 0;
+  unsigned maxLayerSize = 0;
+
   for (unsigned i = 0; i < layerSizes.size(); i++) {
     unsigned prevLayerSize = i == 0 ? networkSpec.numInputs : layerSizes[i-1];
+
+    maxInputSize = max(maxInputSize, prevLayerSize + 1);
+    maxLayerSize = max(maxLayerSize, layerSizes[i]);
 
     d_layerWeights.push_back(util::NewLayerWeights(prevLayerSize + 1, layerSizes[i]));
     d_layerGradients.push_back(util::NewLayerWeights(prevLayerSize + 1, layerSizes[i]));
@@ -51,6 +60,7 @@ static void allocDeviceMemory(void) {
   }
 
   d_samplesBatch = util::NewSamplesBatch(networkSpec.maxBatchSize, networkSpec.numInputs);
+  d_transposeScratch = util::NewLayerWeights(maxLayerSize, maxInputSize);
 }
 
 static void freeDeviceMemory(void) {
@@ -59,6 +69,7 @@ static void freeDeviceMemory(void) {
   for (auto& lo : d_layerOutputs) { util::DeleteLayerBatchOutputs(lo); }
   for (auto& ld : d_layerDeltas) { util::DeleteLayerBatchDeltas(ld); }
   util::DeleteSamplesBatch(d_samplesBatch);
+  util::DeleteLayerWeights(d_transposeScratch);
 }
 
 __global__ void initialiseLayerWeights(LayerWeights layer, const float initRange, Random rnd) {
@@ -152,7 +163,6 @@ void CudaNetwork::GetWeights(std::vector<math::MatrixView> &outWeights) {
 }
 
 static void forwardPass(const math::MatrixView &batchInputs);
-static void applySoftmax(const LayerBatchOutputs &lastLayer);
 // static void backwardPass(const math::MatrixView &batchOutputs);
 
 void CudaNetwork::Train(const math::MatrixView &batchInputs, const math::MatrixView &batchOutputs) {
@@ -281,7 +291,7 @@ void forwardPass(const math::MatrixView &batchInputs) {
 
   LayerBatchOutputs lastLayer = d_layerOutputs[d_layerOutputs.size() - 1];
   if (networkSpec.outputActivation == LayerActivation::SOFTMAX) {
-    applySoftmax(lastLayer);
+    SoftmaxKernel::Apply(lastLayer);
   }
 
   math::MatrixView output = math::MatrixView::Create(lastLayer.batchSize, lastLayer.layerSize);
@@ -300,68 +310,4 @@ void forwardPass(const math::MatrixView &batchInputs) {
     cout << endl;
   }
   cout << endl;
-}
-
-// This softmax code assumes that the output layer is smaller than the maximum number of threads
-// in a block. For ease of implementation, we assume this and do the whole thing in a single block.
-// This allows easy synchronization and easy algorithm. Most problems wont have >1024 outputs.
-// Separate blocks can do separate batch rows.
-__global__ void softmaxKernel(LayerBatchOutputs outputs) {
-  extern __shared__ float buf[]; // shared memory buffer
-
-  const unsigned outIndex = threadIdx.x;
-  const unsigned batchIndex = blockIdx.x;
-
-  assert(blockDim.x <= outputs.layerSize && gridDim.x == outputs.batchSize);
-
-  // A single float to hold data to exchange between threads in this block.
-  float *sharedVar = (float *) &buf[0];
-
-  // Buffer to hold all of the output elements for this batch element.
-  float *outElems = (float *) &buf[1];
-
-  // 1. Copy the row for the current batch into shared memory.
-  float val = *(outputs.OutputElem(batchIndex, outIndex));
-  outElems[outIndex] = val;
-  __syncthreads();
-
-  // 2. Find the max element in the row, done by a single thread per block while all others wait.
-  float maxValue;
-  if (outIndex == 0) {
-    maxValue = outElems[0];
-    for (unsigned i = 1; i < blockDim.x; i++) {
-      maxValue = fmaxf(maxValue, outElems[i]);
-    }
-    *sharedVar = maxValue;
-  }
-  __syncthreads();
-  maxValue = *sharedVar;
-
-  // 3. Calc the unnormalised exponent offset by the max value and write it to shared mem.
-  val = expf(val - maxValue);
-  outElems[outIndex] = val;
-  __syncthreads();
-
-  // 4. Calculate the sum across the batch, done by a single thread per block.
-  float sum = 0.0f;
-  if (outIndex == 0) {
-    for (unsigned i = 0; i < blockDim.x; i++) {
-      sum += outElems[i];
-    }
-    *sharedVar = sum;
-  }
-  __syncthreads();
-  sum = *sharedVar;
-
-  // 5. Calc the normalised value for each output elem and write it out to global mem.
-  *(outputs.OutputElem(batchIndex, outIndex)) = val / sum;
-}
-
-void applySoftmax(const LayerBatchOutputs &lastLayer) {
-  size_t sharedMemSize = (lastLayer.layerSize + 1) * sizeof(float);
-
-  // We dont want to include the bias part of the output in the processing of the softmax.
-  int tpb = lastLayer.layerSize - 1;
-  int bpg = lastLayer.batchSize;
-  softmaxKernel<<<bpg, tpb, sharedMemSize>>>(lastLayer);
 }
