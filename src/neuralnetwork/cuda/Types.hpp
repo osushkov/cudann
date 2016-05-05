@@ -28,14 +28,23 @@ struct LayerWeights {
 struct SamplesBatch {
   unsigned maxBatchSize; // number of rows allocated in memory.
   unsigned batchSize;    // equal to the number of rows in the matrix.
-  unsigned sampleDim;    // equal to the number of columns in the matrix.
+  unsigned inputDim;     // equal to the number of columns in the matrix.
+  unsigned targetOutputDim;
 
   float *input; // matrix sized batchSize(rows) * sampleDim(cols)
-  size_t pitch;
+  size_t ipitch;
 
-  __device__ float *Elem(unsigned r, unsigned c) {
-    assert(r < maxBatchSize && c < sampleDim);
-    return (float *)((char *)input + r * pitch) + c;
+  float *targetOutput; // matrix sized batchSize(rows) * sampleDim(cols)
+  size_t opitch;
+
+  __device__ float *InputElem(unsigned r, unsigned c) {
+    assert(r < maxBatchSize && c < inputDim);
+    return (float *)((char *)input + r * ipitch) + c;
+  }
+
+  __device__ float *TargetOutputElem(unsigned r, unsigned c) {
+    assert(r < maxBatchSize && c < targetOutputDim);
+    return (float *)((char *)targetOutput + r * opitch) + c;
   }
 };
 

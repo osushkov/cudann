@@ -8,7 +8,7 @@
 int main(int argc, char **argv) {
   neuralnetwork::NetworkSpec spec;
   spec.numInputs = 2;
-  spec.numOutputs = 3;
+  spec.numOutputs = 1;
   spec.hiddenLayers = {2};
   spec.maxBatchSize = 10;
   spec.hiddenActivation = neuralnetwork::LayerActivation::RELU;
@@ -18,7 +18,7 @@ int main(int argc, char **argv) {
 
   vector<EMatrix> weights;
   weights.push_back(EMatrix(2, 3));
-  weights.push_back(EMatrix(3, 3));
+  weights.push_back(EMatrix(1, 3));
 
   vector<math::MatrixView> views;
   for (auto &wm : weights) {
@@ -49,9 +49,10 @@ int main(int argc, char **argv) {
   input(2, 0) = 5.0f;
   input(2, 1) = 6.0f;
 
-  EMatrix output(2, 1);
+  EMatrix output(3, 1);
   output(0, 0) = 10.0f;
   output(1, 0) = 12.0f;
+  output(2, 0) = 15.0f;
 
   neuralnetwork::cuda::CudaNetwork::Train(math::GetMatrixView(input), math::GetMatrixView(output));
 

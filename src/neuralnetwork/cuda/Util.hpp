@@ -19,7 +19,7 @@ void FreePushBuffer(void *buf);
 LayerWeights NewLayerWeights(unsigned inputSize, unsigned layerSize);
 void DeleteLayerWeights(LayerWeights &lw);
 
-SamplesBatch NewSamplesBatch(unsigned maxBatchSize, unsigned sampleDim);
+SamplesBatch NewSamplesBatch(unsigned maxBatchSize, unsigned inputDim, unsigned targetOutputDim);
 void DeleteSamplesBatch(SamplesBatch &sb);
 
 LayerBatchOutputs NewLayerBatchOutputs(unsigned maxBatchSize, unsigned layerSize);
