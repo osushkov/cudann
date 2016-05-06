@@ -44,8 +44,6 @@ __device__ float activationDerivative(float in, float out, const LayerActivation
 
 __global__ void forwardPassKernel(LayerWeights lw, LayerBatchOutputs prevOutputs,
                                   LayerBatchOutputs out, const LayerActivation activation) {
-  assert(lw.inputSize == prevOutputs.layerSize);
-  assert(lw.layerSize == out.layerSize - 1);
 
   extern __shared__ float buf[]; // shared memory buffer
 
@@ -101,6 +99,9 @@ __global__ void forwardPassKernel(LayerWeights lw, LayerBatchOutputs prevOutputs
 
 void ForwardPassKernel::Apply(LayerWeights layerWeights, LayerBatchOutputs input,
                               LayerBatchOutputs output, LayerActivation activation) {
+  assert(layerWeights.inputSize == input.layerSize);
+  assert(layerWeights.layerSize == output.layerSize - 1);
+
   // -1 is here since we dont need to compute the bias term for the output vector.
   int bpgX = (output.layerSize - 1 + TPB_X - 1) / TPB_X;
   int bpgY = (output.batchSize + TPB_Y - 1) / TPB_Y;

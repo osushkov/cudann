@@ -6,7 +6,8 @@ namespace neuralnetwork {
 namespace cuda {
 namespace BackwardDeltaKernel {
 
-void Apply(LayerBatchDeltas nextDelta, LayerWeights transposedWeights, LayerBatchDeltas outDelta);
+void Apply(LayerBatchDeltas nextDelta, LayerWeights transposedWeights,
+           LayerBatchOutputs layerOutput, LayerBatchDeltas outDelta);
 }
 }
 }

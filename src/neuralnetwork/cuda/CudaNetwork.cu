@@ -6,6 +6,7 @@
 #include "ForwardPassKernel.hpp"
 #include "TransposeKernel.hpp"
 #include "BackwardDeltaKernel.hpp"
+#include "GradientKernel.hpp"
 #include "Constants.hpp"
 
 #include <cassert>
@@ -21,6 +22,12 @@ using namespace neuralnetwork;
 using namespace neuralnetwork::cuda;
 using namespace std;
 
+// ADAM trainer parameters
+static constexpr float adamBeta1 = 0.9f;
+static constexpr float adamBeta2 = 0.999f;
+static constexpr float adamEpsilon = 10e-8;
+static constexpr float adamLearnRate = 0.001f;
+
 static Random rnd;
 static NetworkSpec networkSpec;
 static vector<LayerWeights> d_layerWeights;
@@ -30,6 +37,11 @@ static vector<LayerBatchDeltas> d_layerDeltas;
 static SamplesBatch d_samplesBatch;
 
 static LayerWeights d_transposeScratch;
+
+// TODO: this stuff should go into a separate file. Trainer code/variables should be
+// separate from network code.
+static vector<LayerWeights> d_adamMomentum;
+static vector<LayerWeights> d_adamRMS;
 
 // Pre-allocated all of the device memory we will need. We should never have to malloc device
 // memory after this function is called.
@@ -57,6 +69,9 @@ static void allocDeviceMemory(void) {
     d_layerGradients.push_back(util::NewLayerWeights(prevLayerSize + 1, layerSizes[i]));
     d_layerOutputs.push_back(util::NewLayerBatchOutputs(networkSpec.maxBatchSize, layerSizes[i] + 1));
     d_layerDeltas.push_back(util::NewLayerBatchDeltas(networkSpec.maxBatchSize, layerSizes[i]));
+
+    d_adamMomentum.push_back(util::NewLayerWeights(prevLayerSize + 1, layerSizes[i]));
+    d_adamRMS.push_back(util::NewLayerWeights(prevLayerSize + 1, layerSizes[i]));
   }
 
   d_samplesBatch =
@@ -70,6 +85,8 @@ static void freeDeviceMemory(void) {
   for (auto& lg : d_layerGradients) { util::DeleteLayerWeights(lg); }
   for (auto& lo : d_layerOutputs) { util::DeleteLayerBatchOutputs(lo); }
   for (auto& ld : d_layerDeltas) { util::DeleteLayerBatchDeltas(ld); }
+  for (auto& am : d_adamMomentum) { util::DeleteLayerWeights(am); }
+  for (auto& am : d_adamRMS) { util::DeleteLayerWeights(am); }
   util::DeleteSamplesBatch(d_samplesBatch);
   util::DeleteLayerWeights(d_transposeScratch);
 }
@@ -83,7 +100,7 @@ __global__ void initialiseLayerWeights(LayerWeights layer, const float initRange
   }
 
   float *out = layer.Elem(row, col);
-  *out = row + col; //initRange * (rnd.SampleUniform(col + row * layer.inputSize) * 2.0f - 1.0f);
+  *out = initRange * (rnd.SampleUniform(col + row * layer.inputSize) * 2.0f - 1.0f);
 }
 
 static void initialiseWeights(void) {
@@ -115,6 +132,33 @@ static void initialiseOutputs(void) {
   }
 }
 
+__global__ void initialiseAdamWeights(LayerWeights momentum, LayerWeights rms) {
+  assert(momentum.inputSize == rms.inputSize);
+  assert(momentum.layerSize == rms.layerSize);
+
+  const unsigned row = blockDim.y * blockIdx.y + threadIdx.y;
+  const unsigned col = blockDim.x * blockIdx.x + threadIdx.x;
+
+  if (row >= rms.layerSize || col >= rms.inputSize) {
+    return;
+  }
+
+  *momentum.Elem(row, col) = 0.0f;
+  *rms.Elem(row, col) = 0.0f;
+}
+
+static void initialiseADAM(void) {
+  assert(d_adamRMS.size() == d_adamMomentum.size());
+
+  for (unsigned i = 0; i < d_adamRMS.size(); i++) {
+    int bpgX = (d_adamRMS[i].inputSize + TPB_X - 1) / TPB_X;
+    int bpgY = (d_adamRMS[i].layerSize + TPB_Y - 1) / TPB_Y;
+
+    initialiseAdamWeights<<<dim3(bpgX, bpgY, 1), dim3(TPB_X, TPB_Y, 1)>>>(
+        d_adamMomentum[i], d_adamRMS[i]);
+  }
+}
+
 void CudaNetwork::Initialise(const NetworkSpec &spec) {
   rnd = Random::Create(2048, 1337);
 
@@ -124,6 +168,7 @@ void CudaNetwork::Initialise(const NetworkSpec &spec) {
   allocDeviceMemory();
   initialiseWeights();
   initialiseOutputs();
+  initialiseADAM();
 }
 
 void CudaNetwork::Cleanup(void) {
@@ -170,12 +215,16 @@ static void forwardPass(void);
 static void backwardPass(void);
 static void generateLayerDeltas(void);
 static void generateGradient(void);
+static void updateAdamParams(void);
+static void updateWeights(void);
 
 void CudaNetwork::Train(const math::MatrixView &batchInputs, const math::MatrixView &batchOutputs) {
     uploadSamplesBatch(batchInputs, batchOutputs);
 
     forwardPass();
     backwardPass();
+    updateAdamParams();
+    updateWeights();
 }
 
 void uploadSamplesBatch(const math::MatrixView &batchInputs, const math::MatrixView &batchOutputs) {
@@ -261,6 +310,8 @@ __global__ void lastLayerDeltasKernel(LayerBatchOutputs networkOutput, SamplesBa
     return;
   }
 
+  // TODO: check whether reading into shared mem, doing computation, then writing to global mem
+  // is faster. You never know.
   *out.Elem(row, col) = *networkOutput.OutputElem(row, col) - *samples.TargetOutputElem(row, col);
 }
 
@@ -286,10 +337,67 @@ void generateLayerDeltas(void) {
     transposedWeights.pitch = d_transposeScratch.pitch;
 
     TransposeKernel::Apply(d_layerWeights[i + 1], transposedWeights);
-    BackwardDeltaKernel::Apply(d_layerDeltas[i + 1], transposedWeights,d_layerDeltas[i]);
+    BackwardDeltaKernel::Apply(d_layerDeltas[i + 1], transposedWeights, d_layerOutputs[i+1], d_layerDeltas[i]);
   }
 }
 
 void generateGradient(void) {
+  for (unsigned i = 0; i < d_layerWeights.size(); i++) {
+    GradientKernel::Apply(d_layerDeltas[i], d_layerOutputs[i], d_layerGradients[i]);
+  }
+}
 
+__global__ void updateMomentumAndRMS(LayerWeights gradient, LayerWeights momentum, LayerWeights rms,
+                                      const float beta1, const float beta2) {
+  const unsigned row = blockDim.y * blockIdx.y + threadIdx.y;
+  const unsigned col = blockDim.x * blockIdx.x + threadIdx.x;
+
+  if (row >= gradient.layerSize || col >= gradient.inputSize) {
+    return;
+  }
+
+  float g = *gradient.Elem(row, col);
+  float m = *momentum.Elem(row, col);
+  float r = *rms.Elem(row, col);
+
+  *momentum.Elem(row, col) = m * beta1 + g * (1.0f - beta1);
+  *rms.Elem(row, col) = r * beta2 + g * g * (1.0f - beta2);
+}
+
+void updateAdamParams(void) {
+  for (unsigned i = 0; i < d_layerGradients.size(); i++) {
+    int bpgX = (d_layerGradients[i].inputSize + TPB_X - 1) / TPB_X;
+    int bpgY = (d_layerGradients[i].layerSize + TPB_Y - 1) / TPB_Y;
+
+    updateMomentumAndRMS<<<dim3(bpgX, bpgY, 1), dim3(TPB_X, TPB_Y, 1)>>>(
+        d_layerGradients[i], d_adamMomentum[i], d_adamRMS[i], adamBeta1, adamBeta2);
+  }
+}
+
+__global__ void updateWeightsWithAdam(LayerWeights weights, LayerWeights momentum, LayerWeights rms,
+                                      const float beta1, const float beta2,
+                                      const float lr, const float epsilon) {
+
+  const unsigned row = blockDim.y * blockIdx.y + threadIdx.y;
+  const unsigned col = blockDim.x * blockIdx.x + threadIdx.x;
+
+  if (row >= rms.layerSize || col >= rms.inputSize) {
+    return;
+  }
+
+  float mc = *momentum.Elem(row, col) / (1.0f - beta1);
+  float rc = *rms.Elem(row, col) / (1.0f - beta2);
+
+  *weights.Elem(row, col) -= lr * mc / sqrtf(rc + epsilon);
+}
+
+void updateWeights(void) {
+  for (unsigned i = 0; i < d_layerWeights.size(); i++) {
+    int bpgX = (d_layerWeights[i].inputSize + TPB_X - 1) / TPB_X;
+    int bpgY = (d_layerWeights[i].layerSize + TPB_Y - 1) / TPB_Y;
+
+    updateWeightsWithAdam<<<dim3(bpgX, bpgY, 1), dim3(TPB_X, TPB_Y, 1)>>>(
+        d_layerWeights[i], d_adamMomentum[i], d_adamRMS[i],
+        adamBeta1, adamBeta2, adamLearnRate, adamEpsilon);
+  }
 }
