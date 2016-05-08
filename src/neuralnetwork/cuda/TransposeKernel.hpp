@@ -6,7 +6,7 @@ namespace neuralnetwork {
 namespace cuda {
 namespace TransposeKernel {
 
-void Apply(LayerWeights layerWeights, LayerWeights transposedWeights);
+void Apply(LayerWeights layerWeights, LayerWeights transposedWeights, cudaStream_t stream);
 }
 }
 }

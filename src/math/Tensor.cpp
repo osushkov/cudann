@@ -6,7 +6,6 @@
 using namespace math;
 
 unsigned Tensor::NumLayers(void) const { return this->data.size(); }
-
 void Tensor::AddLayer(const EMatrix &m) { this->data.push_back(m); }
 
 EMatrix &Tensor::operator()(unsigned index) {

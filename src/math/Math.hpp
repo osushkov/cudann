@@ -8,7 +8,7 @@ typedef Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> EM
 
 namespace math {
 
-MatrixView GetMatrixView(EMatrix &m) {
+static inline MatrixView GetMatrixView(EMatrix &m) {
   MatrixView result;
   result.rows = m.rows();
   result.cols = m.cols();

@@ -9,7 +9,8 @@ using namespace neuralnetwork::cuda;
 
 // computes outDelta = tw * nextDelta (elemwisemul) layerOutput.derivatives
 __global__ void backwardDeltaKernel(LayerBatchDeltas nextDelta, LayerWeights tw,
-                                    LayerBatchOutputs layerOutput, LayerBatchDeltas outDelta) {
+                                    LayerBatchOutputs layerOutput, LayerBatchDeltas outDelta,
+                                    unsigned spitch) {
 
   extern __shared__ float buf[]; // shared memory buffer
 
@@ -22,12 +23,12 @@ __global__ void backwardDeltaKernel(LayerBatchDeltas nextDelta, LayerWeights tw,
   float *twChunk = (float *) buf;
 
   // buffer for holding the prev outputs matrix chunk
-  float *ndChunk = (float *) &buf[blockDim.x * blockDim.y];
+  float *ndChunk = (float *) &buf[spitch * blockDim.y];
 
   const int twRow = blockDim.x * blockIdx.x + threadIdx.y;
   const int ndRow = row;
 
-  const int chunkIndex = threadIdx.x + threadIdx.y * blockDim.x;
+  const int chunkIndex = threadIdx.x + threadIdx.y * spitch;
   const int lim = numChunks * blockDim.x;
 
   float sum = 0.0f;
@@ -45,7 +46,7 @@ __global__ void backwardDeltaKernel(LayerBatchDeltas nextDelta, LayerWeights tw,
 
     int chunkLim = min(blockDim.x, tw.inputSize - chunkOffset);
     for (int j = 0; j < chunkLim; j++) {
-      sum += twChunk[j + threadIdx.x * blockDim.x] * ndChunk[j + threadIdx.y * blockDim.x];
+      sum += twChunk[j + threadIdx.x * spitch] * ndChunk[j + threadIdx.y * spitch];
     }
     __syncthreads();
   }
@@ -57,7 +58,8 @@ __global__ void backwardDeltaKernel(LayerBatchDeltas nextDelta, LayerWeights tw,
 }
 
 void BackwardDeltaKernel::Apply(LayerBatchDeltas nextDelta, LayerWeights transposedWeights,
-                                LayerBatchOutputs layerOutput, LayerBatchDeltas outDelta) {
+                                LayerBatchOutputs layerOutput, LayerBatchDeltas outDelta,
+                                cudaStream_t stream) {
 
   // TODO: handle bank conflicts. Do the same in the forward kernel.
   assert(nextDelta.layerSize == transposedWeights.inputSize);
@@ -68,8 +70,10 @@ void BackwardDeltaKernel::Apply(LayerBatchDeltas nextDelta, LayerWeights transpo
 
   int bpgX = (outDelta.layerSize + TPB_X - 1) / TPB_X;
   int bpgY = (outDelta.batchSize + TPB_Y - 1) / TPB_Y;
-  size_t sharedMemSize = 2 * TPB_X * TPB_Y * sizeof(float);
 
-  backwardDeltaKernel<<<dim3(bpgX, bpgY, 1), dim3(TPB_X, TPB_Y, 1), sharedMemSize>>>(
-      nextDelta, transposedWeights, layerOutput, outDelta);
+  unsigned spitch = (TPB_X + 1);
+  size_t sharedMemSize = 2 * spitch * TPB_Y * sizeof(float);
+
+  backwardDeltaKernel<<<dim3(bpgX, bpgY, 1), dim3(TPB_X, TPB_Y, 1), sharedMemSize, stream>>>(
+      nextDelta, transposedWeights, layerOutput, outDelta, spitch);
 }

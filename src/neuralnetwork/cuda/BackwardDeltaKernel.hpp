@@ -7,7 +7,7 @@ namespace cuda {
 namespace BackwardDeltaKernel {
 
 void Apply(LayerBatchDeltas nextDelta, LayerWeights transposedWeights,
-           LayerBatchOutputs layerOutput, LayerBatchDeltas outDelta);
+           LayerBatchOutputs layerOutput, LayerBatchDeltas outDelta, cudaStream_t stream);
 }
 }
 }

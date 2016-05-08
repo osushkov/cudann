@@ -43,7 +43,9 @@ __device__ float activationDerivative(float in, float out, const LayerActivation
 }
 
 __global__ void forwardPassKernel(LayerWeights lw, LayerBatchOutputs prevOutputs,
-                                  LayerBatchOutputs out, const LayerActivation activation) {
+                                  LayerBatchOutputs out, const LayerActivation activation,
+                                  Random rnd, const float nodeActivationRate, const bool isOutput,
+                                  const unsigned spitch) {
 
   extern __shared__ float buf[]; // shared memory buffer
 
@@ -60,13 +62,13 @@ __global__ void forwardPassKernel(LayerWeights lw, LayerBatchOutputs prevOutputs
   float *lwChunk = (float *) buf;
 
   // buffer for holding the prev outputs matrix chunk
-  float *poChunk = (float *) &buf[blockDim.x * blockDim.y];
+  float *poChunk = (float *) &buf[spitch * blockDim.y];
 
   float sum = 0.0f;
   const int lwRow = blockDim.x * blockIdx.x + threadIdx.y;
   const int poRow = row;
 
-  const int chunkIndex = threadIdx.x + threadIdx.y * blockDim.x;
+  const int chunkIndex = threadIdx.x + threadIdx.y * spitch;
   const int lim = numChunks * blockDim.x;
 
   for (int chunkOffset = 0; chunkOffset < lim; chunkOffset += blockDim.x) {
@@ -83,30 +85,39 @@ __global__ void forwardPassKernel(LayerWeights lw, LayerBatchOutputs prevOutputs
 
     int chunkLim = min(blockDim.x, lw.inputSize - chunkOffset);
     for (int j = 0; j < chunkLim; j++) {
-      sum += lwChunk[j + threadIdx.x * blockDim.x] * poChunk[j + threadIdx.y * blockDim.x];
+      sum += lwChunk[j + threadIdx.x * spitch] * poChunk[j + threadIdx.y * spitch];
     }
     __syncthreads();
   }
 
   if (row < out.batchSize && col < out.layerSize - 1) {
     float *outElem = out.OutputElem(row, col);
-    *outElem = activationValue(sum, activation);
-
     float *dElem = out.DerivativeElem(row, col);
-    *dElem = activationDerivative(sum, *outElem, activation);
+
+    if (isOutput || rnd.SampleUniform(col + row * out.layerSize) < nodeActivationRate) {
+      *outElem = activationValue(sum, activation);
+      *dElem = activationDerivative(sum, *outElem, activation);
+    } else {
+      *outElem = 0.0f;
+      *dElem = 0.0f;
+    }
   }
 }
 
 void ForwardPassKernel::Apply(LayerWeights layerWeights, LayerBatchOutputs input,
-                              LayerBatchOutputs output, LayerActivation activation) {
+                              LayerBatchOutputs output, LayerActivation activation,
+                              Random rnd, float nodeActivationRate, bool isOutputLayer,
+                              cudaStream_t stream) {
   assert(layerWeights.inputSize == input.layerSize);
   assert(layerWeights.layerSize == output.layerSize - 1);
 
   // -1 is here since we dont need to compute the bias term for the output vector.
   int bpgX = (output.layerSize - 1 + TPB_X - 1) / TPB_X;
   int bpgY = (output.batchSize + TPB_Y - 1) / TPB_Y;
-  size_t sharedMemSize = 2 * TPB_X * TPB_Y * sizeof(float);
 
-  forwardPassKernel<<<dim3(bpgX, bpgY, 1), dim3(TPB_X, TPB_Y, 1), sharedMemSize>>>(
-      layerWeights, input, output, activation);
+  unsigned spitch = (TPB_X + 1);
+  size_t sharedMemSize = 2 * spitch * TPB_Y * sizeof(float);
+
+  forwardPassKernel<<<dim3(bpgX, bpgY, 1), dim3(TPB_X, TPB_Y, 1), sharedMemSize, stream>>>(
+      layerWeights, input, output, activation, rnd, nodeActivationRate, isOutputLayer, spitch);
 }

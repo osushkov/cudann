@@ -6,6 +6,7 @@ CCFLAGS += -I/usr/local/include -I/usr/include/eigen3
 CCFLAGS += -Wall -Wno-deprecated-declarations
 
 CUDAFLAGS += --std=c++11
+CUDAFLAGS += --use_fast_math
 CUDAFLAGS += --default-stream per-thread
 CUDAFLAGS += -Xcudafe "--diag_suppress=boolean_controlling_expr_is_constant"
 
@@ -21,3 +22,4 @@ endif
 CLFLAGS += -L/usr/local/cuda/lib64 -lcudart
 CLFLAGS += -L/usr/local/lib
 CLFLAGS += -lpthread
+CLFLAGS += `pkg-config opencv --cflags --libs`

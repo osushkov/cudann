@@ -59,11 +59,11 @@ __global__ void softmaxKernel(LayerBatchOutputs outputs) {
   *(outputs.OutputElem(batchIndex, outIndex)) = val / sum;
 }
 
-void SoftmaxKernel::Apply(const LayerBatchOutputs &lastLayer) {
+void SoftmaxKernel::Apply(const LayerBatchOutputs &lastLayer, cudaStream_t stream) {
   size_t sharedMemSize = (lastLayer.layerSize + 1) * sizeof(float);
 
   // We dont want to include the bias part of the output in the processing of the softmax.
   int tpb = lastLayer.layerSize - 1;
   int bpg = lastLayer.batchSize;
-  softmaxKernel<<<bpg, tpb, sharedMemSize>>>(lastLayer);
+  softmaxKernel<<<bpg, tpb, sharedMemSize, stream>>>(lastLayer);
 }

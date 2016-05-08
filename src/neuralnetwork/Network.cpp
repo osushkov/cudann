@@ -1,8 +1,11 @@
 
 #include "Network.hpp"
 #include "../common/Util.hpp"
+#include "../math/Math.hpp"
 #include "../math/Tensor.hpp"
 #include "Activations.hpp"
+#include "cuda/CudaNetwork.hpp"
+
 #include <cassert>
 #include <cmath>
 #include <cstdlib>
@@ -16,6 +19,7 @@ struct Network::NetworkImpl {
   NetworkImpl(const NetworkSpec &spec) : spec(spec) {
     assert(spec.numInputs > 0 && spec.numOutputs > 0);
     initialiseWeights();
+    initialiseCuda();
   }
 
   EVector Process(const EVector &input) {
@@ -26,12 +30,45 @@ struct Network::NetworkImpl {
       LayerActivation func =
           (i == layerWeights.NumLayers() - 1) ? spec.outputActivation : spec.hiddenActivation;
       layerOutput = getLayerOutput(layerOutput, layerWeights(i), func);
+      layerOutput *= spec.nodeActivationRate;
     }
 
     return layerOutput;
   }
 
-  void Update(const SamplesProvider &samplesProvider) {}
+  void Refresh(void) {
+    vector<math::MatrixView> weightViews;
+    for (unsigned i = 0; i < layerWeights.NumLayers(); i++) {
+      weightViews.push_back(math::GetMatrixView(layerWeights(i)));
+    }
+    cuda::CudaNetwork::GetWeights(weightViews);
+  }
+
+  void Update(const SamplesProvider &samplesProvider) {
+    assert(samplesProvider.NumSamples() <= spec.maxBatchSize);
+
+    EMatrix input(samplesProvider.NumSamples(), spec.numInputs);
+    EMatrix output(samplesProvider.NumSamples(), spec.numOutputs);
+
+    for (unsigned i = 0; i < samplesProvider.NumSamples(); i++) {
+      const TrainingSample &sample = samplesProvider[i];
+
+      assert(sample.input.cols() == 1 && sample.input.rows() == spec.numInputs);
+      assert(sample.expectedOutput.cols() == 1 && sample.expectedOutput.rows() == spec.numOutputs);
+
+      for (unsigned j = 0; j < sample.input.rows(); j++) {
+        input(i, j) = sample.input(j);
+      }
+
+      for (unsigned j = 0; j < sample.expectedOutput.rows(); j++) {
+        output(i, j) = sample.expectedOutput(j);
+      }
+    }
+
+    math::MatrixView batchInputs = math::GetMatrixView(input);
+    math::MatrixView batchOutputs = math::GetMatrixView(output);
+    cuda::CudaNetwork::Train(batchInputs, batchOutputs);
+  }
 
   EVector getLayerOutput(const EVector &prevLayer, const EMatrix &layerWeights,
                          LayerActivation afunc) const {
@@ -88,6 +125,17 @@ struct Network::NetworkImpl {
     return result;
   }
 
+  void initialiseCuda(void) {
+    cuda::CudaNetwork::Initialise(spec);
+
+    vector<math::MatrixView> weights;
+    for (unsigned i = 0; i < layerWeights.NumLayers(); i++) {
+      weights.push_back(math::GetMatrixView(layerWeights(i)));
+    }
+
+    cuda::CudaNetwork::SetWeights(weights);
+  }
+
   EVector softmaxActivations(const EVector &in) const {
     assert(in.rows() > 0);
     EVector result(in.rows());
@@ -115,4 +163,5 @@ Network::Network(const NetworkSpec &spec) : impl(new NetworkImpl(spec)) {}
 Network::~Network() = default;
 
 EVector Network::Process(const EVector &input) { return impl->Process(input); }
+void Network::Refresh(void) { impl->Refresh(); }
 void Network::Update(const SamplesProvider &samplesProvider) { impl->Update(samplesProvider); }

@@ -25,13 +25,14 @@ __global__ void transposeKernel(LayerWeights lw, LayerWeights out, unsigned bufS
   }
 }
 
-void TransposeKernel::Apply(LayerWeights layerWeights, LayerWeights transposedWeights) {
+void TransposeKernel::Apply(LayerWeights layerWeights, LayerWeights transposedWeights,
+                            cudaStream_t stream) {
   int bpgX = (layerWeights.inputSize + TPB_X - 1) / TPB_X;
   int bpgY = (layerWeights.layerSize + TPB_Y - 1) / TPB_Y;
 
   unsigned stride = TPB_X + 1;
   size_t sharedMemSize = stride * TPB_Y * sizeof(float);
 
-  transposeKernel<<<dim3(bpgX, bpgY, 1), dim3(TPB_X, TPB_Y, 1), sharedMemSize>>>(
+  transposeKernel<<<dim3(bpgX, bpgY, 1), dim3(TPB_X, TPB_Y, 1), sharedMemSize, stream>>>(
       layerWeights, transposedWeights, stride);
 }

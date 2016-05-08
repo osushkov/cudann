@@ -31,6 +31,7 @@ static constexpr float adamLearnRate = 0.001f;
 static Random rnd;
 static NetworkSpec networkSpec;
 static vector<LayerWeights> d_layerWeights;
+static vector<LayerWeights> d_layerWeightsBridge;
 static vector<LayerWeights> d_layerGradients;
 static vector<LayerBatchOutputs> d_layerOutputs;
 static vector<LayerBatchDeltas> d_layerDeltas;
@@ -42,6 +43,72 @@ static LayerWeights d_transposeScratch;
 // separate from network code.
 static vector<LayerWeights> d_adamMomentum;
 static vector<LayerWeights> d_adamRMS;
+
+static cudaStream_t uploadStream;
+static cudaStream_t computeStream;
+
+static void printMatrixView(math::MatrixView view) {
+  for (unsigned r = 0; r < view.rows; r++) {
+    for(unsigned c = 0; c < view.cols; c++) {
+      std::cout << view.data[c + r * view.cols] << " ";
+    }
+    std::cout << std::endl;
+  }
+}
+
+static void printLayerWeights(LayerWeights d_weights) {
+  math::MatrixView view;
+  view.rows = d_weights.layerSize;
+  view.cols = d_weights.inputSize;
+  view.data = new float[view.rows * view.cols];
+
+  cudaError_t err = cudaMemcpy2D(
+      view.data, view.cols * sizeof(float),
+      d_weights.weights, d_weights.pitch,
+      view.cols * sizeof(float), view.rows,
+      cudaMemcpyDeviceToHost);
+
+  CheckError(err);
+
+  printMatrixView(view);
+  delete[] view.data;
+}
+
+static void printLayerOutputs(LayerBatchOutputs d_outputs) {
+  math::MatrixView view;
+  view.rows = d_outputs.batchSize;
+  view.cols = d_outputs.layerSize;
+  view.data = new float[view.rows * view.cols];
+
+  cudaError_t err = cudaMemcpy2D(
+      view.data, view.cols * sizeof(float),
+      d_outputs.output, d_outputs.opitch,
+      view.cols * sizeof(float), view.rows,
+      cudaMemcpyDeviceToHost);
+
+  CheckError(err);
+
+  printMatrixView(view);
+  delete[] view.data;
+}
+
+static void printLayerDeltas(LayerBatchDeltas d_deltas) {
+  math::MatrixView view;
+  view.rows = d_deltas.batchSize;
+  view.cols = d_deltas.layerSize;
+  view.data = new float[view.rows * view.cols];
+
+  cudaError_t err = cudaMemcpy2D(
+      view.data, view.cols * sizeof(float),
+      d_deltas.delta, d_deltas.pitch,
+      view.cols * sizeof(float), view.rows,
+      cudaMemcpyDeviceToHost);
+
+  CheckError(err);
+
+  printMatrixView(view);
+  delete[] view.data;
+}
 
 // Pre-allocated all of the device memory we will need. We should never have to malloc device
 // memory after this function is called.
@@ -66,6 +133,7 @@ static void allocDeviceMemory(void) {
     maxLayerSize = max(maxLayerSize, layerSizes[i]);
 
     d_layerWeights.push_back(util::NewLayerWeights(prevLayerSize + 1, layerSizes[i]));
+    d_layerWeightsBridge.push_back(util::NewLayerWeights(prevLayerSize + 1, layerSizes[i]));
     d_layerGradients.push_back(util::NewLayerWeights(prevLayerSize + 1, layerSizes[i]));
     d_layerOutputs.push_back(util::NewLayerBatchOutputs(networkSpec.maxBatchSize, layerSizes[i] + 1));
     d_layerDeltas.push_back(util::NewLayerBatchDeltas(networkSpec.maxBatchSize, layerSizes[i]));
@@ -82,6 +150,7 @@ static void allocDeviceMemory(void) {
 
 static void freeDeviceMemory(void) {
   for (auto& lw : d_layerWeights) { util::DeleteLayerWeights(lw); }
+  for (auto& lw : d_layerWeightsBridge) { util::DeleteLayerWeights(lw); }
   for (auto& lg : d_layerGradients) { util::DeleteLayerWeights(lg); }
   for (auto& lo : d_layerOutputs) { util::DeleteLayerBatchOutputs(lo); }
   for (auto& ld : d_layerDeltas) { util::DeleteLayerBatchDeltas(ld); }
@@ -162,6 +231,9 @@ static void initialiseADAM(void) {
 void CudaNetwork::Initialise(const NetworkSpec &spec) {
   rnd = Random::Create(2048, 1337);
 
+  uploadStream = 0;
+  computeStream = 0;
+
   networkSpec = spec;
   assert(networkSpec.hiddenActivation != LayerActivation::SOFTMAX);
 
@@ -185,7 +257,7 @@ void CudaNetwork::SetWeights(const std::vector<math::MatrixView> &weights) {
     cudaError_t err = cudaMemcpy2D(
         d_layerWeights[i].weights, d_layerWeights[i].pitch,
         weights[i].data, weights[i].cols * sizeof(float),
-        weights[i].cols, weights[i].rows,
+        weights[i].cols * sizeof(float), weights[i].rows,
         cudaMemcpyHostToDevice);
 
     CheckError(err);
@@ -193,17 +265,17 @@ void CudaNetwork::SetWeights(const std::vector<math::MatrixView> &weights) {
 }
 
 void CudaNetwork::GetWeights(std::vector<math::MatrixView> &outWeights) {
-  assert(outWeights.size() == d_layerWeights.size());
+  assert(outWeights.size() == d_layerWeightsBridge.size());
 
   for (unsigned i = 0; i < outWeights.size(); i++) {
-    assert(outWeights[i].rows == d_layerWeights[i].layerSize);
-    assert(outWeights[i].cols == d_layerWeights[i].inputSize);
+    assert(outWeights[i].rows == d_layerWeightsBridge[i].layerSize);
+    assert(outWeights[i].cols == d_layerWeightsBridge[i].inputSize);
 
-    cudaError_t err = cudaMemcpy2D(
+    cudaError_t err = cudaMemcpy2DAsync(
         outWeights[i].data, outWeights[i].cols * sizeof(float), // dst
-        d_layerWeights[i].weights, d_layerWeights[i].pitch, // src
+        d_layerWeightsBridge[i].weights, d_layerWeightsBridge[i].pitch, // src
         outWeights[i].cols * sizeof(float), outWeights[i].rows, // width, height
-        cudaMemcpyDeviceToHost);
+        cudaMemcpyDeviceToHost, uploadStream);
 
     CheckError(err);
   }
@@ -225,6 +297,16 @@ void CudaNetwork::Train(const math::MatrixView &batchInputs, const math::MatrixV
     backwardPass();
     updateAdamParams();
     updateWeights();
+
+    for (unsigned i = 0; i < d_layerWeights.size(); i++) {
+      cudaError_t err = cudaMemcpy2D(
+          d_layerWeightsBridge[i].weights, d_layerWeightsBridge[i].pitch,
+          d_layerWeights[i].weights, d_layerWeights[i].pitch,
+          d_layerWeights[i].inputSize * sizeof(float), d_layerWeights[i].layerSize,
+          cudaMemcpyDeviceToDevice);
+
+      CheckError(err);
+    }
 }
 
 void uploadSamplesBatch(const math::MatrixView &batchInputs, const math::MatrixView &batchOutputs) {
@@ -256,41 +338,50 @@ void forwardPass(void) {
   }
 
   // copy the batch inputs into the first layer outputs.
-  cudaError_t err = cudaMemcpy2D(
+  cudaError_t err = cudaMemcpy2DAsync(
       d_layerOutputs[0].output, d_layerOutputs[0].opitch, // dst
       d_samplesBatch.input, d_samplesBatch.ipitch,        // src
       d_samplesBatch.inputDim * sizeof(float), d_samplesBatch.batchSize, // width, height
-      cudaMemcpyDeviceToDevice);
+      cudaMemcpyDeviceToDevice, computeStream);
   CheckError(err);
 
   for (unsigned i = 1; i < d_layerOutputs.size(); i++) {
     LayerActivation activation = (i == d_layerOutputs.size() - 1) ?
         networkSpec.outputActivation : networkSpec.hiddenActivation;
 
-    ForwardPassKernel::Apply(d_layerWeights[i-1], d_layerOutputs[i-1], d_layerOutputs[i], activation);
+    ForwardPassKernel::Apply(d_layerWeights[i-1], d_layerOutputs[i-1], d_layerOutputs[i],
+        activation, rnd, networkSpec.nodeActivationRate, i == (d_layerOutputs.size() - 1),
+        computeStream);
+
+    // std::cout << "prev layer:" << std::endl;
+    // printLayerOutputs(d_layerOutputs[i-1]);
+    // std::cout << "layer weights:" << std::endl;
+    // printLayerWeights(d_layerWeights[i-1]);
+    // std::cout << "output:" << std::endl;
+    // printLayerOutputs(d_layerOutputs[i]);
   }
 
   LayerBatchOutputs lastLayer = d_layerOutputs[d_layerOutputs.size() - 1];
   if (networkSpec.outputActivation == LayerActivation::SOFTMAX) {
-    SoftmaxKernel::Apply(lastLayer);
+    SoftmaxKernel::Apply(lastLayer, computeStream);
   }
 
-  math::MatrixView output = math::MatrixView::Create(lastLayer.batchSize, lastLayer.layerSize);
-
-  err = cudaMemcpy2D(
-      output.data, output.cols * sizeof(float), // dst
-      lastLayer.output, lastLayer.opitch, // src
-      output.cols * sizeof(float), output.rows, // width, height
-      cudaMemcpyDeviceToHost);
-  CheckError(err);
-
-  for (unsigned r = 0; r < output.rows; r++) {
-    for (unsigned c = 0; c < output.cols; c++) {
-      cout << output.data[c + r * output.cols] << "\t";
-    }
-    cout << endl;
-  }
-  cout << endl;
+  // math::MatrixView output = math::MatrixView::Create(lastLayer.batchSize, lastLayer.layerSize);
+  //
+  // err = cudaMemcpy2D(
+  //     output.data, output.cols * sizeof(float), // dst
+  //     lastLayer.output, lastLayer.opitch, // src
+  //     output.cols * sizeof(float), output.rows, // width, height
+  //     cudaMemcpyDeviceToHost);
+  // CheckError(err);
+  //
+  // for (unsigned r = 0; r < output.rows; r++) {
+  //   for (unsigned c = 0; c < output.cols; c++) {
+  //     cout << output.data[c + r * output.cols] << "\t";
+  //   }
+  //   cout << endl;
+  // }
+  // cout << endl;
 }
 
 void backwardPass(void) {
@@ -329,6 +420,9 @@ void generateLayerDeltas(void) {
   lastLayerDeltasKernel<<<dim3(bpgX, bpgY, 1), dim3(TPB_X, TPB_Y, 1)>>>(
       networkOutput, d_samplesBatch, lastLayerDeltas);
 
+  // std::cout << "layer deltas:" << std::endl;
+  // printLayerDeltas(lastLayerDeltas);
+
   for (int i = d_layerDeltas.size() - 2; i >= 0; i--) {
     LayerWeights transposedWeights;
     transposedWeights.inputSize = d_layerWeights[i + 1].layerSize;
@@ -336,14 +430,26 @@ void generateLayerDeltas(void) {
     transposedWeights.weights = d_transposeScratch.weights;
     transposedWeights.pitch = d_transposeScratch.pitch;
 
-    TransposeKernel::Apply(d_layerWeights[i + 1], transposedWeights);
-    BackwardDeltaKernel::Apply(d_layerDeltas[i + 1], transposedWeights, d_layerOutputs[i+1], d_layerDeltas[i]);
+    TransposeKernel::Apply(d_layerWeights[i + 1], transposedWeights, computeStream);
+
+    BackwardDeltaKernel::Apply(d_layerDeltas[i + 1], transposedWeights, d_layerOutputs[i+1],
+                               d_layerDeltas[i], computeStream);
+
+    // std::cout << "utweights: " << std::endl;
+    // printLayerWeights(d_layerWeights[i + 1]);
+    // std::cout << "tweights: " << std::endl;
+    // printLayerWeights(transposedWeights);
+    // std::cout << "layer deltas:" << std::endl;
+    // printLayerDeltas(d_layerDeltas[i]);
   }
 }
 
 void generateGradient(void) {
   for (unsigned i = 0; i < d_layerWeights.size(); i++) {
-    GradientKernel::Apply(d_layerDeltas[i], d_layerOutputs[i], d_layerGradients[i]);
+    GradientKernel::Apply(d_layerDeltas[i], d_layerOutputs[i], d_layerGradients[i], computeStream);
+
+    // std::cout << "gradient: " << std::endl;
+    // printLayerWeights(d_layerGradients[i]);
   }
 }
 
@@ -391,13 +497,33 @@ __global__ void updateWeightsWithAdam(LayerWeights weights, LayerWeights momentu
   *weights.Elem(row, col) -= lr * mc / sqrtf(rc + epsilon);
 }
 
+__global__ void updateWeightsWithGradient(LayerWeights weights, LayerWeights gradient,
+                                          const float lr) {
+
+  const unsigned row = blockDim.y * blockIdx.y + threadIdx.y;
+  const unsigned col = blockDim.x * blockIdx.x + threadIdx.x;
+
+  if (row >= weights.layerSize || col >= weights.inputSize) {
+    return;
+  }
+
+  float d = *gradient.Elem(row, col);
+  *weights.Elem(row, col) -= lr * d;
+}
+
 void updateWeights(void) {
   for (unsigned i = 0; i < d_layerWeights.size(); i++) {
     int bpgX = (d_layerWeights[i].inputSize + TPB_X - 1) / TPB_X;
     int bpgY = (d_layerWeights[i].layerSize + TPB_Y - 1) / TPB_Y;
 
+    // updateWeightsWithGradient<<<dim3(bpgX, bpgY, 1), dim3(TPB_X, TPB_Y, 1)>>>(
+    //     d_layerWeights[i], d_layerGradients[i], 0.001f);
+
     updateWeightsWithAdam<<<dim3(bpgX, bpgY, 1), dim3(TPB_X, TPB_Y, 1)>>>(
         d_layerWeights[i], d_adamMomentum[i], d_adamRMS[i],
         adamBeta1, adamBeta2, adamLearnRate, adamEpsilon);
+
+    // std::cout << "new weights: " << std::endl;
+    // printLayerWeights(d_layerWeights[i]);
   }
 }
