@@ -1,6 +1,7 @@
 
 #pragma once
 
+#include "../../math/MatrixView.hpp"
 #include "Types.hpp"
 #include <cuda_runtime.h>
 
@@ -27,6 +28,11 @@ void DeleteLayerBatchOutputs(LayerBatchOutputs &lbo);
 
 LayerBatchDeltas NewLayerBatchDeltas(unsigned maxBatchSize, unsigned layerSize);
 void DeleteLayerBatchDeltas(LayerBatchDeltas &lbd);
+
+void PrintMatrixView(math::MatrixView view);
+void PrintLayerWeights(LayerWeights d_weights);
+void PrintLayerOutputs(LayerBatchOutputs d_outputs);
+void PrintLayerDeltas(LayerBatchDeltas d_deltas);
 }
 }
 }

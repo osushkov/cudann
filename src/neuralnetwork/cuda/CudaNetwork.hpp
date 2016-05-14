@@ -1,21 +1,26 @@
 
 #pragma once
 
-// #include "../../math/Tensor.hpp"
 #include "../../math/MatrixView.hpp"
 #include "../NetworkSpec.hpp"
+#include <memory>
 
 namespace neuralnetwork {
 namespace cuda {
-namespace CudaNetwork {
 
-void Initialise(const NetworkSpec &spec);
-void Cleanup(void);
+class CudaNetwork {
+public:
+  CudaNetwork(const NetworkSpec &spec);
+  ~CudaNetwork();
 
-void SetWeights(const std::vector<math::MatrixView> &weights);
-void GetWeights(std::vector<math::MatrixView> &outWeights);
+  void SetWeights(const std::vector<math::MatrixView> &weights);
+  void GetWeights(std::vector<math::MatrixView> &outWeights);
 
-void Train(const math::MatrixView &batchInputs, const math::MatrixView &batchOutputs);
-}
+  void Train(const math::MatrixView &batchInputs, const math::MatrixView &batchOutputs);
+
+private:
+  struct CudaNetworkImpl;
+  std::unique_ptr<CudaNetworkImpl> impl;
+};
 }
 }

@@ -138,3 +138,66 @@ void util::DeleteLayerBatchDeltas(LayerBatchDeltas &lbd) {
   CheckError(err);
   lbd.delta = nullptr;
 }
+
+void util::PrintMatrixView(math::MatrixView view) {
+  for (unsigned r = 0; r < view.rows; r++) {
+    for(unsigned c = 0; c < view.cols; c++) {
+      std::cout << view.data[c + r * view.cols] << " ";
+    }
+    std::cout << std::endl;
+  }
+}
+
+void util::PrintLayerWeights(LayerWeights d_weights) {
+  math::MatrixView view;
+  view.rows = d_weights.layerSize;
+  view.cols = d_weights.inputSize;
+  view.data = new float[view.rows * view.cols];
+
+  cudaError_t err = cudaMemcpy2D(
+      view.data, view.cols * sizeof(float),
+      d_weights.weights, d_weights.pitch,
+      view.cols * sizeof(float), view.rows,
+      cudaMemcpyDeviceToHost);
+
+  CheckError(err);
+
+  PrintMatrixView(view);
+  delete[] view.data;
+}
+
+void util::PrintLayerOutputs(LayerBatchOutputs d_outputs) {
+  math::MatrixView view;
+  view.rows = d_outputs.batchSize;
+  view.cols = d_outputs.layerSize;
+  view.data = new float[view.rows * view.cols];
+
+  cudaError_t err = cudaMemcpy2D(
+      view.data, view.cols * sizeof(float),
+      d_outputs.output, d_outputs.opitch,
+      view.cols * sizeof(float), view.rows,
+      cudaMemcpyDeviceToHost);
+
+  CheckError(err);
+
+  PrintMatrixView(view);
+  delete[] view.data;
+}
+
+void util::PrintLayerDeltas(LayerBatchDeltas d_deltas) {
+  math::MatrixView view;
+  view.rows = d_deltas.batchSize;
+  view.cols = d_deltas.layerSize;
+  view.data = new float[view.rows * view.cols];
+
+  cudaError_t err = cudaMemcpy2D(
+      view.data, view.cols * sizeof(float),
+      d_deltas.delta, d_deltas.pitch,
+      view.cols * sizeof(float), view.rows,
+      cudaMemcpyDeviceToHost);
+
+  CheckError(err);
+
+  PrintMatrixView(view);
+  delete[] view.data;
+}

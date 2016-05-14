@@ -15,6 +15,7 @@ using namespace neuralnetwork;
 struct Network::NetworkImpl {
   NetworkSpec spec;
   math::Tensor layerWeights;
+  uptr<cuda::CudaNetwork> cudaNetwork;
 
   NetworkImpl(const NetworkSpec &spec) : spec(spec) {
     assert(spec.numInputs > 0 && spec.numOutputs > 0);
@@ -41,7 +42,7 @@ struct Network::NetworkImpl {
     for (unsigned i = 0; i < layerWeights.NumLayers(); i++) {
       weightViews.push_back(math::GetMatrixView(layerWeights(i)));
     }
-    cuda::CudaNetwork::GetWeights(weightViews);
+    cudaNetwork->GetWeights(weightViews);
   }
 
   void Update(const SamplesProvider &samplesProvider) {
@@ -67,7 +68,7 @@ struct Network::NetworkImpl {
 
     math::MatrixView batchInputs = math::GetMatrixView(input);
     math::MatrixView batchOutputs = math::GetMatrixView(output);
-    cuda::CudaNetwork::Train(batchInputs, batchOutputs);
+    cudaNetwork->Train(batchInputs, batchOutputs);
   }
 
   EVector getLayerOutput(const EVector &prevLayer, const EMatrix &layerWeights,
@@ -126,14 +127,14 @@ struct Network::NetworkImpl {
   }
 
   void initialiseCuda(void) {
-    cuda::CudaNetwork::Initialise(spec);
+    cudaNetwork = make_unique<cuda::CudaNetwork>(spec);
 
     vector<math::MatrixView> weights;
     for (unsigned i = 0; i < layerWeights.NumLayers(); i++) {
       weights.push_back(math::GetMatrixView(layerWeights(i)));
     }
 
-    cuda::CudaNetwork::SetWeights(weights);
+    cudaNetwork->SetWeights(weights);
   }
 
   EVector softmaxActivations(const EVector &in) const {

@@ -64,7 +64,7 @@ uptr<Network> createNewNetwork(unsigned inputSize, unsigned outputSize) {
   spec.hiddenLayers = {inputSize, inputSize / 2};
   spec.nodeActivationRate = 0.6f;
   spec.maxBatchSize = 2000;
-  spec.hiddenActivation = LayerActivation::LEAKY_RELU;
+  spec.hiddenActivation = LayerActivation::TANH;
   spec.outputActivation = LayerActivation::SOFTMAX;
 
   return make_unique<Network>(spec);
@@ -100,7 +100,7 @@ void learn(Network *network, vector<TrainingSample> &trainingSamples,
 SamplesProvider getStochasticSamples(vector<TrainingSample> &allSamples, unsigned curIter,
                                      unsigned totalIters) {
 
-  unsigned numSamples = min<unsigned>(allSamples.size(), 2000);
+  unsigned numSamples = min<unsigned>(allSamples.size(), 500);
 
   if ((curSamplesIndex + numSamples) > allSamples.size()) {
     if (numCompletePasses % 10 == 0) {
